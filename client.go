@@ -13,15 +13,11 @@ import (
 type Client struct {
 	rpc rpc.TriggeredStreamClient
 
-	triggers map[TriggerId]Trigger
-
-	globalTriggerReady bool
+	globalTrigger *trigger
 }
 
 func NewClient() *Client {
 	c := &Client{}
-
-	c.triggers = make(map[TriggerId]Trigger)
 
 	return c
 }
@@ -35,61 +31,12 @@ func (c *Client) Connect(hostname string, port int) error {
 
 	c.rpc = rpc.NewTriggeredStreamClient(conn)
 
-	return nil
-}
-
-func (c *Client) NewTrigger() (TriggerId, error) {
-
-	resp, err := c.rpc.NewTrigger(context.Background(), &rpc.MsgVoid{})
+	err = c.initGlobalTrigger()
 	if err != nil {
-		return 0, fmt.Errorf("%T.NewTrigger: gRPC error: %w", c, err)
+		return fmt.Errorf("%T.Connect: %w", c, err)
 	}
-
-	id := TriggerId(resp.GetId())
-
-	err = c.startTriggerMan(id)
-	if err != nil {
-		return 0, fmt.Errorf("%T.Client: could not start the trigger manager: %w", c, err)
-	}
-
-	c.triggers[id] = make(Trigger)
-	return id, nil
-}
-
-func (c *Client) Trigger(id TriggerId) error {
-
-	trigger, ok := c.triggers[id]
-	if !ok {
-		return fmt.Errorf("%T.Client: no trigger with id %d", c, id)
-	}
-
-	trigger <- pull
 
 	return nil
-}
-
-func (c *Client) initGlobalTrigger() error {
-	if c.globalTriggerReady {
-		return nil
-	}
-
-	err := c.startTriggerMan(globalTriggerId)
-	if err != nil {
-		return fmt.Errorf("%T.Client: could not start the global trigger manager: %w", c, err)
-	}
-
-	c.triggers[globalTriggerId] = make(Trigger)
-
-	c.globalTriggerReady = true
-	return nil
-}
-
-func (c *Client) GlobalTrigger() error {
-	err := c.initGlobalTrigger()
-	if err != nil {
-		return fmt.Errorf("%T.GlobalTrigger: %w", c, err)
-	}
-	return c.Trigger(globalTriggerId)
 }
 
 func (c *Client) NewStream(signalNames []string, triggerId TriggerId) (StreamId, error) {
@@ -112,16 +59,72 @@ func (c *Client) NewStreamWithGlobalTrigger(signalNames []string) (StreamId, err
 	return c.NewStream(signalNames, globalTriggerId)
 }
 
-func (c *Client) startTriggerMan(id TriggerId) error {
+type trigger struct {
+	client *Client
 
-	trigger, ok := c.triggers[id]
-	if !ok {
-		return fmt.Errorf("%T.Client: no trigger with id %d", c, id)
+	id TriggerId
+
+	trig Trigger
+}
+
+func (c *Client) initGlobalTrigger() error {
+	if c.globalTrigger != nil {
+		return nil
 	}
 
-	triggerPipe, err := c.rpc.Trigger(context.Background())
+	t := &trigger{
+		client: c,
+		id:     globalTriggerId,
+		trig:   make(Trigger),
+	}
+
+	err := t.start()
 	if err != nil {
-		return fmt.Errorf("%T.Client: could not open the trigger pipe: %w", c, err)
+		return fmt.Errorf("%T.initGlobalTrigger: could not start the global trigger manager: %w", c, err)
+	}
+
+	c.globalTrigger = t
+	return nil
+}
+
+func (c *Client) PullGlobalTrigger() {
+	c.globalTrigger.Pull()
+}
+
+func (c *Client) NewTrigger() (*trigger, error) {
+
+	resp, err := c.rpc.NewTrigger(context.Background(), &rpc.MsgVoid{})
+	if err != nil {
+		return nil, fmt.Errorf("%T.NewTrigger: gRPC error: %w", c, err)
+	}
+
+	id := TriggerId(resp.GetId())
+
+	t := &trigger{
+		client: c,
+		id:     id,
+		trig:   make(Trigger),
+	}
+
+	err = t.start()
+	if err != nil {
+		return nil, fmt.Errorf("%T.NewTrigger: could not start the trigger manager: %w", c, err)
+	}
+
+	return t, nil
+}
+
+func (t *trigger) Pull() {
+	t.trig <- pull
+}
+
+func (t *trigger) start() error {
+
+	trigger := t.trig
+
+	triggerPipe, err := t.client.rpc.Trigger(context.Background())
+	if err != nil {
+		return fmt.Errorf("%T.start: could not open the trigger pipe: %w", t, err)
 	}
 
 	go func() {
@@ -133,7 +136,7 @@ func (c *Client) startTriggerMan(id TriggerId) error {
 				return
 			}
 
-			err := triggerPipe.Send(&rpc.MsgTrigger{Id: uint32(id)})
+			err := triggerPipe.Send(&rpc.MsgTrigger{Id: uint32(t.id)})
 			if err != nil {
 				return
 			}
