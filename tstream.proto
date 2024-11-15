@@ -1,0 +1,32 @@
+syntax = "proto3";
+option go_package = "./rpc";
+package tstream;
+
+service TriggeredStream {
+    rpc NewTrigger(MsgVoid) returns (MsgTrigger) {}
+
+    rpc Trigger(stream MsgTrigger) returns (MsgVoid) {}
+
+    rpc NewStream(MsgStreamReq) returns (MsgStream) {}
+
+    rpc Stream(MsgStream) returns (stream MsgData) {}
+}
+
+message MsgVoid { }
+
+message MsgTrigger{
+    uint32 Id = 1;
+}
+
+message MsgStreamReq {
+    uint32 TriggerId = 1;
+    repeated string Signals = 2;
+}
+
+message MsgStream {
+    uint32 Id = 1;
+}
+
+message MsgData {
+    repeated uint32 Values = 1;
+}
