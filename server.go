@@ -15,7 +15,7 @@ type DataSrc interface {
 }
 
 const (
-	globalTriggerId = 0xDEADBEEF
+	globalTriggerId = 0x00610BA1
 )
 
 type TriggerId uint32
@@ -23,7 +23,12 @@ type StreamId uint32
 
 var pull struct{} = struct{}{}
 
-type Trigger chan struct{}
+type Trigger struct {
+	channel     chan struct{}
+	fanouts     map[int32]*fanout
+	chNewFanout chan *fanout
+	chRemFanout chan *fanout
+}
 
 type Stream struct {
 	trigger Trigger
@@ -31,7 +36,10 @@ type Stream struct {
 }
 
 type Server struct {
-	data     DataSrc
+	rpc.UnimplementedTriggeredStreamServer
+
+	data DataSrc
+
 	triggers map[TriggerId]Trigger
 	streams  map[StreamId]Stream
 }
@@ -44,9 +52,20 @@ func NewServer(data DataSrc) *Server {
 	s.streams = make(map[StreamId]Stream)
 
 	s.triggers = make(map[TriggerId]Trigger)
-	s.triggers[globalTriggerId] = make(Trigger)
+	s.triggers[globalTriggerId] = makeTrigger()
 
 	return s
+}
+
+func makeTrigger() Trigger {
+	t := Trigger{
+		channel:     make(chan struct{}),
+		fanouts:     make(map[int32]*fanout),
+		chNewFanout: make(chan *fanout),
+		chRemFanout: make(chan *fanout),
+	}
+	go t.fanout()
+	return t
 }
 
 func (s *Server) NewTrigger(context.Context, *rpc.MsgVoid) (*rpc.MsgTrigger, error) {
@@ -59,12 +78,13 @@ func (s *Server) NewTrigger(context.Context, *rpc.MsgVoid) (*rpc.MsgTrigger, err
 		_, exists = s.triggers[id]
 	}
 
-	s.triggers[id] = make(Trigger)
+	s.triggers[id] = makeTrigger()
 
 	resp.Id = uint32(id)
 
 	return resp, nil
 }
+
 func (s *Server) Trigger(in grpc.ClientStreamingServer[rpc.MsgTrigger, rpc.MsgVoid]) error {
 
 	for {
@@ -78,10 +98,7 @@ func (s *Server) Trigger(in grpc.ClientStreamingServer[rpc.MsgTrigger, rpc.MsgVo
 			return fmt.Errorf("%T.Trigger: bad trigger id %d", s, msg.GetId())
 		}
 
-		select {
-		case trigger <- pull:
-		default:
-		}
+		trigger.channel <- pull
 	}
 }
 
@@ -99,6 +116,7 @@ func (s *Server) NewStream(ctx context.Context, req *rpc.MsgStreamReq) (*rpc.Msg
 		id = StreamId(rand.Uint32())
 		_, exists = s.streams[id]
 	}
+	resp.Id = uint32(id)
 
 	s.streams[id] = Stream{trigger: trigger, signals: req.GetSignals()}
 
@@ -111,8 +129,11 @@ func (s *Server) Stream(req *rpc.MsgStream, out grpc.ServerStreamingServer[rpc.M
 		return fmt.Errorf("%T.Trigger: bad stream id %d", s, req.GetId())
 	}
 
+	t := stream.trigger.subscribe()
+	defer stream.trigger.unsubscribe(t)
+
 	for {
-		_, ok := <-stream.trigger
+		_, ok := <-t.channel
 		if !ok {
 			return nil
 		}
@@ -129,4 +150,49 @@ func (s *Server) Stream(req *rpc.MsgStream, out grpc.ServerStreamingServer[rpc.M
 			return fmt.Errorf("%T.Stream: could not send: %w", s, err)
 		}
 	}
+}
+
+func (t Trigger) subscribe() *fanout {
+	f := t.newFanout()
+	t.chNewFanout <- f
+	return f
+}
+
+func (t Trigger) unsubscribe(f *fanout) {
+	t.chRemFanout <- f
+}
+
+func (t Trigger) fanout() {
+	for {
+		select {
+		case f := <-t.chNewFanout:
+			t.fanouts[f.id] = f
+		case f := <-t.chRemFanout:
+			delete(t.fanouts, f.id)
+			close(f.channel)
+		case <-t.channel:
+			for _, f := range t.fanouts {
+				f.channel <- struct{}{}
+			}
+		}
+	}
+}
+
+type fanout struct {
+	id      int32
+	channel chan struct{}
+}
+
+func (t Trigger) newFanout() *fanout {
+	var id int32
+	exists := true
+	for exists {
+		id = rand.Int31()
+		_, exists = t.fanouts[id]
+	}
+	f := &fanout{
+		id:      id,
+		channel: make(chan struct{}, 1),
+	}
+	return f
 }
