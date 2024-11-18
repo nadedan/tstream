@@ -39,7 +39,14 @@ func (c *Client) Connect(hostname string, port int) error {
 	return nil
 }
 
-func (c *Client) NewStream(signalNames []string, triggerId TriggerId) (StreamId, error) {
+type stream struct {
+	c      *Client
+	id     StreamId
+	pipe   chan []uint32
+	stream grpc.ServerStreamingClient[rpc.MsgData]
+}
+
+func (c *Client) NewStream(signalNames []string, triggerId TriggerId) (*stream, error) {
 
 	resp, err := c.rpc.NewStream(context.Background(),
 		&rpc.MsgStreamReq{
@@ -49,22 +56,45 @@ func (c *Client) NewStream(signalNames []string, triggerId TriggerId) (StreamId,
 	)
 
 	if err != nil {
-		return 0, fmt.Errorf("%T.NewStream: %w", c, err)
+		return nil, fmt.Errorf("%T.NewStream: %w", c, err)
 	}
 
-	return StreamId(resp.GetId()), nil
+	s := &stream{
+		c:    c,
+		id:   StreamId(resp.GetId()),
+		pipe: make(chan []uint32),
+	}
+
+	err = s.start()
+	if err != nil {
+		close(s.pipe)
+		return nil, fmt.Errorf("%T.NewStream: could not start stream: %w", c, err)
+	}
+
+	return s, nil
 }
 
-func (c *Client) NewStreamWithGlobalTrigger(signalNames []string) (StreamId, error) {
+func (s *stream) start() error {
+	var err error
+	s.stream, err = s.c.rpc.Stream(context.Background(), &rpc.MsgStream{Id: uint32(s.id)})
+	if err != nil {
+		return fmt.Errorf("%T.start: could not get the stream: %w", s, err)
+	}
+
+	return nil
+}
+
+func (s *stream) Recv() (*rpc.MsgData, error) {
+	msg, err := s.stream.Recv()
+	if err != nil {
+		return nil, fmt.Errorf("%T.Recv: %w", s, err)
+	}
+
+	return msg, nil
+}
+
+func (c *Client) NewStreamWithGlobalTrigger(signalNames []string) (*stream, error) {
 	return c.NewStream(signalNames, globalTriggerId)
-}
-
-type trigger struct {
-	client *Client
-
-	id TriggerId
-
-	trig Trigger
 }
 
 func (c *Client) initGlobalTrigger() error {
@@ -73,9 +103,9 @@ func (c *Client) initGlobalTrigger() error {
 	}
 
 	t := &trigger{
-		client: c,
-		id:     globalTriggerId,
-		trig:   make(Trigger),
+		c:    c,
+		id:   globalTriggerId,
+		trig: make(chan struct{}),
 	}
 
 	err := t.start()
@@ -91,6 +121,14 @@ func (c *Client) PullGlobalTrigger() {
 	c.globalTrigger.Pull()
 }
 
+type trigger struct {
+	c *Client
+
+	id TriggerId
+
+	trig chan struct{}
+}
+
 func (c *Client) NewTrigger() (*trigger, error) {
 
 	resp, err := c.rpc.NewTrigger(context.Background(), &rpc.MsgVoid{})
@@ -101,9 +139,9 @@ func (c *Client) NewTrigger() (*trigger, error) {
 	id := TriggerId(resp.GetId())
 
 	t := &trigger{
-		client: c,
-		id:     id,
-		trig:   make(Trigger),
+		c:    c,
+		id:   id,
+		trig: make(chan struct{}),
 	}
 
 	err = t.start()
@@ -122,7 +160,7 @@ func (t *trigger) start() error {
 
 	trigger := t.trig
 
-	triggerPipe, err := t.client.rpc.Trigger(context.Background())
+	triggerPipe, err := t.c.rpc.Trigger(context.Background())
 	if err != nil {
 		return fmt.Errorf("%T.start: could not open the trigger pipe: %w", t, err)
 	}
