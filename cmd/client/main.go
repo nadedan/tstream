@@ -8,7 +8,7 @@ import (
 )
 
 func main() {
-	c := tstream.NewClient()
+	c := tstream.NewTriggeredStreamClient()
 
 	err := c.Connect("", 8080)
 	if err != nil {

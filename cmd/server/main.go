@@ -19,7 +19,7 @@ func main() {
 	}
 
 	srv := grpc.NewServer()
-	rpc.RegisterTriggeredStreamServer(srv, tstream.NewServer(data{}))
+	rpc.RegisterTriggeredStreamServer(srv, tstream.NewTriggeredStreamService(data{}))
 
 	fmt.Println("Serving on 8080")
 	srv.Serve(lis)

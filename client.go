@@ -10,15 +10,15 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
-type Client struct {
+type TriggeredStreamClient struct {
 	rpc rpc.TriggeredStreamClient
 
-	globalTrigger *trigger
+	globalTrigger *clientTrigger
 }
 
-// NewClient returns a pointer to a triggered stream client
-func NewClient() *Client {
-	c := &Client{}
+// NewTriggeredStreamClient returns a pointer to a triggered stream client
+func NewTriggeredStreamClient() *TriggeredStreamClient {
+	c := &TriggeredStreamClient{}
 
 	return c
 }
@@ -26,7 +26,7 @@ func NewClient() *Client {
 // Connect to a triggered stream server at hostname:port
 //
 // Inits the global trigger
-func (c *Client) Connect(hostname string, port int) error {
+func (c *TriggeredStreamClient) Connect(hostname string, port int) error {
 
 	conn, err := grpc.NewClient(fmt.Sprintf("%s:%d", hostname, port), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
@@ -44,17 +44,17 @@ func (c *Client) Connect(hostname string, port int) error {
 }
 
 // PullGlobalTrigger to cause the server to Send new data on all streams on the global trigger
-func (c *Client) PullGlobalTrigger() {
+func (c *TriggeredStreamClient) PullGlobalTrigger() {
 	c.globalTrigger.Pull()
 }
 
 // NewStreamWithGlobalTrigger requests a stream from the server that gets data on every pull of the global trigger
-func (c *Client) NewStreamWithGlobalTrigger(signalNames []string) (*stream, error) {
+func (c *TriggeredStreamClient) NewStreamWithGlobalTrigger(signalNames []string) (*clientStream, error) {
 	return c.NewStream(signalNames, globalTriggerId)
 }
 
 // NewSteam requests a stream from the server that gets data on every pull of the specified trigger
-func (c *Client) NewStream(signalNames []string, triggerId TriggerId) (*stream, error) {
+func (c *TriggeredStreamClient) NewStream(signalNames []string, triggerId TriggerId) (*clientStream, error) {
 
 	resp, err := c.rpc.NewStream(context.Background(),
 		&rpc.MsgStreamReq{
@@ -67,7 +67,7 @@ func (c *Client) NewStream(signalNames []string, triggerId TriggerId) (*stream, 
 		return nil, fmt.Errorf("%T.NewStream: %w", c, err)
 	}
 
-	s := &stream{
+	s := &clientStream{
 		c:  c,
 		id: StreamId(resp.GetId()),
 	}
@@ -82,7 +82,7 @@ func (c *Client) NewStream(signalNames []string, triggerId TriggerId) (*stream, 
 
 // NewTrigger gets a new, unique, trigger id from the triggered stream server. This trigger id can be used when setting
 // up a NewStream.
-func (c *Client) NewTrigger() (*trigger, error) {
+func (c *TriggeredStreamClient) NewTrigger() (*clientTrigger, error) {
 
 	resp, err := c.rpc.NewTrigger(context.Background(), &rpc.MsgVoid{})
 	if err != nil {
@@ -91,7 +91,7 @@ func (c *Client) NewTrigger() (*trigger, error) {
 
 	id := TriggerId(resp.GetId())
 
-	t := &trigger{
+	t := &clientTrigger{
 		c:    c,
 		id:   id,
 		trig: make(chan struct{}),
@@ -105,14 +105,14 @@ func (c *Client) NewTrigger() (*trigger, error) {
 	return t, nil
 }
 
-type stream struct {
-	c      *Client
+type clientStream struct {
+	c      *TriggeredStreamClient
 	id     StreamId
 	stream grpc.ServerStreamingClient[rpc.MsgData]
 }
 
 // Recv blocks until it receives data from the stream
-func (s *stream) Recv() (*rpc.MsgData, error) {
+func (s *clientStream) Recv() (*rpc.MsgData, error) {
 	msg, err := s.stream.Recv()
 	if err != nil {
 		return nil, fmt.Errorf("%T.Recv: %w", s, err)
@@ -122,12 +122,12 @@ func (s *stream) Recv() (*rpc.MsgData, error) {
 }
 
 // initGlobalTrigger starts the global trigger manager for the triggered stream client
-func (c *Client) initGlobalTrigger() error {
+func (c *TriggeredStreamClient) initGlobalTrigger() error {
 	if c.globalTrigger != nil {
 		return nil
 	}
 
-	t := &trigger{
+	t := &clientTrigger{
 		c:    c,
 		id:   globalTriggerId,
 		trig: make(chan struct{}),
@@ -142,8 +142,8 @@ func (c *Client) initGlobalTrigger() error {
 	return nil
 }
 
-type trigger struct {
-	c *Client
+type clientTrigger struct {
+	c *TriggeredStreamClient
 
 	id TriggerId
 
@@ -151,12 +151,12 @@ type trigger struct {
 }
 
 // Pull causes the trigger to fire which will make the stream server send data to all clients on this trigger
-func (t *trigger) Pull() {
-	t.trig <- pull
+func (t *clientTrigger) Pull() {
+	t.trig <- struct{}{}
 }
 
 // start listening for trigger pulls so we can notify the triggered stream server
-func (t *trigger) start() error {
+func (t *clientTrigger) start() error {
 
 	trigger := t.trig
 
